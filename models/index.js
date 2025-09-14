@@ -9,7 +9,7 @@ const ensureSuperuser = async () => {
     const superuser = await User.findOne({ role: 'superuser' }).lean();
     if (!superuser) {
       await User.create({
-        phone: '+1234567890',
+        email: 'admin@torryanchor.com',
         password: 'password', // hashed by pre-save hook
         role: 'superuser',
         isVerified: true

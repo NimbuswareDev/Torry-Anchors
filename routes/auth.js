@@ -3,10 +3,11 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const { User } = require('../models');
 const { auth } = require('../middlewares/auth');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 
-// Mock OTP storage (in production, use Redis or database)
+// OTP storage (in production, use Redis or database)
 const otpStore = new Map();
 
 // Generate OTP
@@ -14,15 +15,9 @@ const generateOTP = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// Mock SMS sending (in production, integrate with Twilio)
-const sendSMS = async (phone, message) => {
-  console.log(`SMS to ${phone}: ${message}`);
-  return true;
-};
-
 // Register new user
 router.post('/register', [
-  body('phone').isMobilePhone().withMessage('Valid phone number required'),
+  body('email').isEmail().withMessage('Valid email address required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
@@ -31,23 +26,27 @@ router.post('/register', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { phone } = req.body;
+    const { email } = req.body;
 
     // Check if user already exists
-    const existingUser = await User.findOne({ phone });
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ error: 'User already exists with this phone number' });
+      return res.status(400).json({ error: 'User already exists with this email address' });
     }
 
     // Generate and store OTP
     const otp = generateOTP();
-    otpStore.set(phone, { otp, timestamp: Date.now() });
+    otpStore.set(email, { otp, timestamp: Date.now() });
 
-    // Send OTP via SMS
-    await sendSMS(phone, `Your OTP for TorryAnchor registration is: ${otp}`);
+    // Send OTP via email
+    const emailResult = await emailService.sendOTPEmail(email, otp, 'registration');
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send verification email' });
+    }
 
     res.status(201).json({
-      message: 'OTP sent to your phone. Please verify OTP to complete registration.'
+      message: 'OTP sent to your email. Please verify OTP to complete registration.'
     });
   } catch (error) {
     console.error('Registration error:', error);
@@ -57,8 +56,9 @@ router.post('/register', [
 
 // Verify registration OTP
 router.post('/verify-register', [
-  body('phone').isMobilePhone().withMessage('Valid phone number required'),
-  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
+  body('email').isEmail().withMessage('Valid email address required'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -66,30 +66,30 @@ router.post('/verify-register', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { phone, otp } = req.body;
+    const { email, otp, password } = req.body;
 
     // Check if OTP exists and is valid
-    const storedOTP = otpStore.get(phone);
+    const storedOTP = otpStore.get(email);
     if (!storedOTP || storedOTP.otp !== otp) {
       return res.status(400).json({ error: 'Invalid OTP' });
     }
 
     // Check if OTP is expired (5 minutes)
     if (Date.now() - storedOTP.timestamp > 5 * 60 * 1000) {
-      otpStore.delete(phone);
+      otpStore.delete(email);
       return res.status(400).json({ error: 'OTP expired' });
     }
 
-    // Create user (password should be sent in the initial registration)
+    // Create user
     const user = await User.create({
-      phone,
-      password: req.body.password, // This should be sent from frontend
+      email,
+      password,
       role: 'consumer',
       isVerified: true
     });
 
     // Clear OTP
-    otpStore.delete(phone);
+    otpStore.delete(email);
 
     res.json({
       message: 'Registration verified. You can now login.'
@@ -102,7 +102,7 @@ router.post('/verify-register', [
 
 // Login
 router.post('/login', [
-  body('phone').isMobilePhone().withMessage('Valid phone number required'),
+  body('email').isEmail().withMessage('Valid email address required'),
   body('password').notEmpty().withMessage('Password required')
 ], async (req, res) => {
   try {
@@ -111,18 +111,18 @@ router.post('/login', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { phone, password } = req.body;
+    const { email, password } = req.body;
 
     // Find user
-    const user = await User.findOne({ phone });
+    const user = await User.findOne({ email });
     if (!user) {
-      return res.status(400).json({ error: 'Invalid phone number or password' });
+      return res.status(400).json({ error: 'Invalid email or password' });
     }
 
     // Check password
     const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
-      return res.status(400).json({ error: 'Invalid phone number or password' });
+      return res.status(400).json({ error: 'Invalid email or password' });
     }
 
     // Check if user is verified
@@ -132,13 +132,17 @@ router.post('/login', [
 
     // Generate OTP for login
     const otp = generateOTP();
-    otpStore.set(phone, { otp, timestamp: Date.now(), isLogin: true });
+    otpStore.set(email, { otp, timestamp: Date.now(), isLogin: true });
 
-    // Send OTP via SMS
-    await sendSMS(phone, `Your OTP for TorryAnchor login is: ${otp}`);
+    // Send OTP via email
+    const emailResult = await emailService.sendOTPEmail(email, otp, 'login');
+    
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send verification email' });
+    }
 
     res.json({
-      message: 'OTP sent. Please provide the OTP to complete login.',
+      message: 'OTP sent to your email. Please provide the OTP to complete login.',
       requiresOTP: true
     });
   } catch (error) {
@@ -149,7 +153,7 @@ router.post('/login', [
 
 // Verify login OTP
 router.post('/verify-login', [
-  body('phone').isMobilePhone().withMessage('Valid phone number required'),
+  body('email').isEmail().withMessage('Valid email address required'),
   body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
 ], async (req, res) => {
   try {
@@ -158,22 +162,22 @@ router.post('/verify-login', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { phone, otp } = req.body;
+    const { email, otp } = req.body;
 
     // Check if OTP exists and is valid
-    const storedOTP = otpStore.get(phone);
+    const storedOTP = otpStore.get(email);
     if (!storedOTP || storedOTP.otp !== otp || !storedOTP.isLogin) {
       return res.status(400).json({ error: 'Invalid OTP' });
     }
 
     // Check if OTP is expired (5 minutes)
     if (Date.now() - storedOTP.timestamp > 5 * 60 * 1000) {
-      otpStore.delete(phone);
+      otpStore.delete(email);
       return res.status(400).json({ error: 'OTP expired' });
     }
 
     // Find user
-    const user = await User.findOne({ phone });
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ error: 'User not found' });
     }
@@ -186,13 +190,13 @@ router.post('/verify-login', [
     );
 
     // Clear OTP
-    otpStore.delete(phone);
+    otpStore.delete(email);
 
     res.json({
       token,
       user: {
         id: user._id.toString(),
-        phone: user.phone,
+        email: user.email,
         role: user.role
       }
     });
@@ -208,7 +212,7 @@ router.get('/profile', auth, async (req, res) => {
     const u = req.user;
     res.json({
       id: u._id.toString(),
-      phone: u.phone,
+      email: u.email,
       role: u.role,
       isVerified: u.isVerified,
       address: u.address,
@@ -229,7 +233,7 @@ router.put('/profile', auth, async (req, res) => {
     for (const f of fields) if (req.body[f] !== undefined) req.user[f] = req.body[f];
     await req.user.save();
     res.json({ message: 'Profile updated', user: {
-      id: req.user._id.toString(), phone: req.user.phone, role: req.user.role,
+      id: req.user._id.toString(), email: req.user.email, role: req.user.role,
       address: req.user.address, city: req.user.city, state: req.user.state, pincode: req.user.pincode
     }});
   } catch (e) {

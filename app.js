@@ -6,6 +6,7 @@ const logger = require('./middlewares/logger');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const errorHandler = require('./middlewares/errorHandler');
+const emailService = require('./services/emailService');
 
 // Load env vars
 dotenv.config();
@@ -27,6 +28,8 @@ app.use(rateLimit({
 connectMongo(process.env.MONGO_URI)
   .then(async () => {
     await ensureSuperuser();
+    // Verify email service configuration
+    await emailService.verifyEmailConfiguration();
   })
   .catch(err => {
     console.log('Mongo connection failed: ' + err.message);
